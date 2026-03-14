@@ -1,0 +1,58 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# .NET
+bin/
+obj/
+*.dll
+*.pdb
+*.exe
+*.deps.json
+*.runtimeconfig.json
+*.cache
+*.AssemblyInfo.cs
+*.GlobalUsings.g.cs
+*.editorconfig
+*AssemblyAttributes.cs
+project.assets.json
+project.nuget.cache
+*.nuget.dgspec.json
+*.nuget.g.props
+*.nuget.g.targets
+*.Up2Date
+apphost
+ref/
+refint/
+*.genruntimeconfig.cache
+
+# Go
+vendor/
+*.test
+*.out
+*.prof
+*.trace
+
+# Executables
+agent
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Build
+build/
+dist/
