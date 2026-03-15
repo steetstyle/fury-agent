@@ -2,6 +2,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 var app = builder.Build();
 
+LangAngo.CSharp.Instrumentation.MethodTracer.Initialize();
+
 app.MapGet("/api/welcome", () => new { message = "Hello World", timestamp = DateTime.UtcNow });
 
 app.MapGet("/api/users/{id}", async (int id) =>
@@ -90,6 +92,13 @@ app.MapGet("/api/heavy-calculation", async () =>
 {
     var result = HeavyBusinessMethod();
     return new { result, message = "Heavy calculation done" };
+});
+
+// E2E Scenario A "Deep Dive": Controller -> ServiceA -> ServiceB (Cecil-instrumented chain)
+app.MapGet("/api/complex-logic", () =>
+{
+    var controller = new LangAngo.TestApp.ComplexLogicController();
+    return controller.Handle();
 });
 
 app.MapGet("/api/http-outbound", async () =>

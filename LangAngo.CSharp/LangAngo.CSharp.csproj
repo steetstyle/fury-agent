@@ -13,8 +13,10 @@
     <Compile Include="src/Core/Span.cs" />
     <Compile Include="src/Core/Logger.cs" />
     <Compile Include="src/Core/EventPipeEvent.cs" />
+    <Compile Include="src/Core/SymbolMapCache.cs" />
     <Compile Include="src/Instrumentation/IInstrumentationHandler.cs" />
-    <Compile Include="src/Instrumentation/HttpHandler.cs" />
+    <Compile Include="src/Instrumentation/HttpInboundHandler.cs" />
+    <Compile Include="src/Instrumentation/HttpOutboundHandler.cs" />
     <Compile Include="src/Instrumentation/DbHandler.cs" />
     <Compile Include="src/Instrumentation/ExceptionHandler.cs" />
     <Compile Include="src/Instrumentation/PropertyFetcher.cs" />

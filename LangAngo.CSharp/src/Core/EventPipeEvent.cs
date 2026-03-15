@@ -136,8 +136,15 @@ public readonly struct EventPipeEvent
         };
     }
 
-    public static EventPipeEvent CreateSamplingEvent(Guid traceId, ulong spanId, ulong? parentSpanId, string stackTrace, Duration duration)
+    public static EventPipeEvent CreateSamplingEvent(Guid traceId, ulong spanId, ulong? parentSpanId, string stackTrace, Duration duration, string? callStack = null)
     {
+        var tags = new Dictionary<string, string>
+        {
+            { "duration_us", duration.TotalMicroseconds.ToString("F0") },
+            { "sample_type", "stack_walk" }
+        };
+        if (!string.IsNullOrEmpty(callStack))
+            tags["call_stack"] = callStack;
         return new EventPipeEvent
         {
             EventType = Protocol.EventType.Sampling,
@@ -147,11 +154,38 @@ public readonly struct EventPipeEvent
             ParentSpanId = parentSpanId,
             Name = "StackSample",
             Value = stackTrace,
+            Tags = tags
+        };
+    }
+
+    public static EventPipeEvent CreateSymbolMap(ulong startAddress, ulong methodSize, string methodName)
+    {
+        return new EventPipeEvent
+        {
+            EventType = Protocol.EventType.SymbolMap,
+            Timestamp = GetTimestamp(),
+            TraceId = Guid.Empty,
+            Name = methodName,
+            Value = startAddress.ToString(),
             Tags = new Dictionary<string, string>
             {
-                { "duration_us", duration.TotalMicroseconds.ToString("F0") },
-                { "sample_type", "stack_walk" }
+                { "start_address", startAddress.ToString() },
+                { "method_size", methodSize.ToString() }
             }
+        };
+    }
+
+    /// <summary>Runtime method events (MethodLoad, MethodUnload, MethodJittingStarted, R2R, JIT inlining/tail call, ILToNativeMap).</summary>
+    public static EventPipeEvent CreateRuntimeMethodEvent(string eventName, Dictionary<string, string>? tags = null)
+    {
+        return new EventPipeEvent
+        {
+            EventType = Protocol.EventType.RuntimeMethodEvent,
+            Timestamp = GetTimestamp(),
+            TraceId = Guid.Empty,
+            Name = eventName,
+            Value = "",
+            Tags = tags
         };
     }
 }

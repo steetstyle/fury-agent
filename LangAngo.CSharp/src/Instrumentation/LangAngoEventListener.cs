@@ -14,6 +14,10 @@ public sealed class LangAngoEventListener : EventListener
     private const string EventCounterEventSourceName = "EventCounterIntervalSec";
     private const string SampleProfilerName = "Microsoft-DotNETRuntime-SampleProfiler";
 
+    // Keywords: JIT (0x10) ve MethodDiagnostic (0x40) sembol çözümü için kritiktir.
+    private const EventKeywords JITKeyword = (EventKeywords)0x10;
+    private const EventKeywords MethodDiagnosticKeyword = (EventKeywords)0x40;
+
     private bool _isInitialized;
     private bool _enableRuntimeEvents;
     private bool _enableGCEvents;
@@ -23,6 +27,7 @@ public sealed class LangAngoEventListener : EventListener
     private bool _enableSampling;
 
     private readonly ConcurrentDictionary<ulong, SpanContext> _activeSpans = new();
+    private readonly SymbolMapCache _symbolCache = new();
     private int _eventCount;
     private int _sampleIntervalMs = 100;
 
@@ -59,13 +64,16 @@ public sealed class LangAngoEventListener : EventListener
             _enableRuntimeEvents, _enableGCEvents, _enableJITEvents, _enableContentionEvents, _enableThreadPoolEvents, _enableSampling);
     }
 
+    private readonly List<string> printedEventSources = new();
+
     protected override void OnEventSourceCreated(EventSource eventSource)
     {
         if (eventSource.Name == RuntimeEventSourceName || 
             eventSource.Name == RuntimeEventSourceNamePrivate)
         {
-            EnableEvents(eventSource, EventLevel.Informational, 
-                EventKeywords.All);
+            // JIT ve MethodDiagnostic olaylarını açıkça dahil ediyoruz
+            EnableEvents(eventSource, EventLevel.Verbose, 
+                EventKeywords.All | JITKeyword | MethodDiagnosticKeyword);
         }
         else if (eventSource.Name.Contains("EventCounter"))
         {
@@ -75,13 +83,27 @@ public sealed class LangAngoEventListener : EventListener
         {
             EnableEvents(eventSource, EventLevel.Verbose, EventKeywords.All);
         }
+
+        if (!printedEventSources.Contains(eventSource.Name))
+        {
+            printedEventSources.Add(eventSource.Name);
+            Logger.Verbose("[EventListener] Event source created: {0}", eventSource.Name);
+        }
     }
+
+    private readonly List<string> printedEventNames = new();
 
     protected override void OnEventWritten(EventWrittenEventArgs eventData)
     {
         if (Interlocked.Increment(ref _eventCount) % 1000 == 0)
         {
             Logger.Verbose("[EventListener] Events processed: {0}", _eventCount);
+        }
+
+        if (!printedEventNames.Contains(eventData.EventName))
+        {
+            printedEventNames.Add(eventData.EventName);
+            Logger.Verbose("[EventListener] Event written: {0}", eventData.EventName);
         }
 
         try
@@ -100,6 +122,7 @@ public sealed class LangAngoEventListener : EventListener
                         HandleJITEvent(eventData);
                     break;
 
+
                 case "ContentionStart_V2":
                 case "ContentionStop":
                     if (_enableContentionEvents)
@@ -117,16 +140,96 @@ public sealed class LangAngoEventListener : EventListener
                     HandleExceptionEvent(eventData);
                     break;
 
+                case "ThreadSample":
                 case "ClrStackWalk":
                 case "ClrMethod":
                     if (_enableSampling)
                         HandleSamplingEvent(eventData);
+                    break;
+
+                // Runtime method events (https://learn.microsoft.com/en-us/dotnet/fundamentals/diagnostics/runtime-method-events)
+                case "MethodLoad_V1":
+                case "MethodLoad_V2":
+                case "MethodUnLoad_V1":
+                case "MethodUnLoad_V2":
+                case "MethodLoadVerbose_V1":
+                case "MethodLoadVerbose_V2":
+                case "MethodUnLoadVerbose_V1":
+                case "MethodUnLoadVerbose_V2":
+                case "MethodJittingStarted_V1":
+                case "R2RGetEntryPoint":
+                case "R2RGetEntryPointStart":
+                case "MethodR2RLoadVerbose_V1":
+                case "MethodILToNativeMap":
+                case "MethodJitInliningSucceeded":
+                case "MethodJitInliningFailed":
+                case "MethodJitTailCallSucceeded":
+                case "MethodJitTailCallFailed":
+                    if (_enableJITEvents)
+                        HandleRuntimeMethodEvent(eventData);
                     break;
             }
         }
         catch (Exception ex)
         {
             Logger.Warning("[EventListener] Error processing event: {0}", ex.Message);
+        }
+    }
+
+    private void HandleRuntimeMethodEvent(EventWrittenEventArgs eventData)
+    {
+        try
+        {
+            var tags = new Dictionary<string, string>();
+            var names = eventData.PayloadNames;
+            var payload = eventData.Payload;
+            if (payload != null)
+            {
+                for (var i = 0; i < payload.Count; i++)
+                {
+                    var key = (names != null && i < names.Count) ? names[i] ?? $"Payload{i}" : $"Payload{i}";
+                    var val = payload[i];
+                    tags[key] = val?.ToString() ?? "";
+                }
+            }
+            var evt = EventPipeEvent.CreateRuntimeMethodEvent(eventData.EventName ?? "RuntimeMethod", tags);
+            SendEvent(evt);
+
+            if ((eventData.EventName == "MethodLoadVerbose_V1" || eventData.EventName == "MethodLoadVerbose_V2") &&
+                payload != null && payload.Count >= 8)
+            {
+                var startAddress = Convert.ToUInt64(payload[3]);
+                var methodSize = Convert.ToUInt32(payload[4]);
+                var methodName = payload[7]?.ToString() ?? "UnknownMethod";
+                _symbolCache.Add(startAddress, methodSize, methodName);
+                SendEvent(EventPipeEvent.CreateSymbolMap(startAddress, methodSize, methodName));
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Verbose("[EventListener] RuntimeMethodEvent error: {0}", ex.Message);
+        }
+    }
+
+    private void HandleMethodLoadEvent(EventWrittenEventArgs eventData)
+    {
+        try
+        {
+            // Payload Indexleri: 3: MethodStartAddress, 4: MethodSize, 7: MethodName
+            if (eventData.Payload == null || eventData.Payload.Count < 8) return;
+
+            var startAddress = Convert.ToUInt64(eventData.Payload[3]);
+            var methodSize = Convert.ToUInt32(eventData.Payload[4]);
+            var methodName = eventData.Payload[7]?.ToString() ?? "UnknownMethod";
+
+            Logger.Verbose("[EventListener] MethodLoad event: {0} 0x{1:X} {2}", methodName, startAddress, methodSize);
+
+            var evt = EventPipeEvent.CreateSymbolMap(startAddress, methodSize, methodName);
+            SendEvent(evt);
+        }
+        catch (Exception ex)
+        {
+            Logger.Verbose("[EventListener] MethodLoad Parse Error: {0}", ex.Message);
         }
     }
 
@@ -138,22 +241,35 @@ public sealed class LangAngoEventListener : EventListener
             var spanId = GenerateSpanId();
             var parentSpanId = activity?.Id;
 
-            var stackTrace = "";
-            if (eventData.Payload != null && eventData.Payload.Count > 0)
+            Logger.Verbose("[EventListener] Sampling event: {0}", eventData.EventName);
+
+            var ips = new List<ulong>();
+            if (eventData.Payload != null)
             {
-                stackTrace = eventData.Payload[0]?.ToString() ?? "";
+                foreach (var item in eventData.Payload)
+                {
+                    if (item is ulong u) ips.Add(u);
+                    else if (item is long l && l >= 0) ips.Add((ulong)l);
+                    else if (item is uint u32) ips.Add(u32);
+                    else if (item is int i32 && i32 >= 0) ips.Add((ulong)i32);
+                }
             }
+
+            var stackTrace = ips.Count > 0 ? string.Join(",", ips.Select(ip => $"0x{ip:X}")) : "";
+            var callStack = ips.Count > 0 ? _symbolCache.BuildCallStack(ips) : null;
 
             if (!string.IsNullOrEmpty(stackTrace))
             {
                 var guidTraceId = GetCurrentTraceId();
-                
+                Logger.Verbose("[EventListener] Trace ID: {0}", guidTraceId);
+
                 var evt = EventPipeEvent.CreateSamplingEvent(
-                    guidTraceId, 
-                    spanId, 
+                    guidTraceId,
+                    spanId,
                     parentSpanId != null ? GenerateSpanId() : (ulong?)null,
                     stackTrace,
-                    Duration.FromMicroseconds(_sampleIntervalMs * 1000)
+                    Duration.FromMicroseconds(_sampleIntervalMs * 1000),
+                    callStack
                 );
                 SendEvent(evt);
             }
@@ -173,6 +289,8 @@ public sealed class LangAngoEventListener : EventListener
         {
             var spanId = GenerateSpanId();
             var traceId = GetCurrentTraceId();
+
+            Logger.Verbose("[EventListener] GCStart event: {0} {1} {2}", gen, reason, spanId);
             
             _activeSpans.TryAdd(spanId, new SpanContext
             {
@@ -213,6 +331,8 @@ public sealed class LangAngoEventListener : EventListener
         var methodName = eventData.Payload?[0]?.ToString() ?? "Unknown";
         var duration = Duration.FromMicroseconds(eventData.Payload?[1] as double? ?? 0);
         var traceId = GetCurrentTraceId();
+
+        Logger.Verbose("[EventListener] JIT event: {0} {1}", methodName, duration.TotalMilliseconds);
         
         var evt = EventPipeEvent.CreateJITEvent(methodName, duration, traceId);
         SendEvent(evt);
@@ -370,7 +490,10 @@ public sealed class LangAngoEventListener : EventListener
 
             SpanChannel.Writer.TryWrite(span);
             
-            Logger.Verbose("[EventListener] Event sent: {0} {1}", evt.EventType, evt.Name);
+            if(!evt.EventType.ToString().Contains("Runtime") && !evt.EventType.ToString().Contains("Symbol"))
+            {
+                Logger.Verbose("[EventListener] Event sent: {0} {1}", evt.EventType, evt.Name);
+            }
         }
         catch (Exception ex)
         {

@@ -4,10 +4,11 @@ using LangAngo.CSharp.Transport;
 
 namespace LangAngo.CSharp.Instrumentation;
 
-public sealed class HttpHandler : BaseInstrumentationHandler
+public sealed class HttpInboundHandler : BaseInstrumentationHandler
 {
     private readonly Dictionary<string, Span> _activeSpans = new();
     private readonly object _lock = new();
+
 
     public override string SourceName => "Microsoft.AspNetCore";
 
@@ -60,9 +61,12 @@ public sealed class HttpHandler : BaseInstrumentationHandler
 
         var fullUrl = string.IsNullOrEmpty(queryString) ? path : $"{path}{queryString}";
 
-        var ctx = TraceContext.CreateRoot(Protocol.SpanKind.Server);
+        var traceparent = GetTraceparentFromRequest(requestObj);
+        var ctx = TraceContext.CreateFromW3C(traceparent, Protocol.SpanKind.Server) ?? TraceContext.CreateRoot(Protocol.SpanKind.Server);
         ctx.SetAsCurrent();
         TraceContext.RegisterActiveTrace(ctx.TraceId);
+
+        InjectTraceparentIntoResponse(context, ctx.ToTraceparent());
 
         var span = new Span
         {
@@ -97,12 +101,66 @@ public sealed class HttpHandler : BaseInstrumentationHandler
         SpanChannel.Writer.TryWrite(span);
     }
 
+    private static string? GetTraceparentFromRequest(object? requestObj)
+    {
+        if (requestObj == null) return null;
+        var headers = PropertyFetcher.FetchProperty(requestObj, "Headers");
+        if (headers == null) return null;
+        var traceparent = PropertyFetcher.FetchProperty(headers, "Traceparent") ?? PropertyFetcher.FetchProperty(headers, "traceparent");
+        return traceparent?.ToString();
+    }
+
+    /// <summary>Inject W3C traceparent into response headers so clients and the agent can correlate the request.</summary>
+    private static void InjectTraceparentIntoResponse(object? httpContext, string traceparent)
+    {
+        if (string.IsNullOrEmpty(traceparent) || httpContext == null) return;
+        try
+        {
+            var response = PropertyFetcher.FetchProperty(httpContext, "Response");
+            if (response == null) return;
+            var headers = PropertyFetcher.FetchProperty(response, "Headers");
+            if (headers == null) return;
+            var t = headers.GetType();
+            foreach (var m in t.GetMethods())
+            {
+                if (m.Name != "Append" || m.GetParameters().Length != 2) continue;
+                var p1 = m.GetParameters()[0];
+                var p2 = m.GetParameters()[1];
+                if (p1.ParameterType != typeof(string)) continue;
+                var arg2 = p2.ParameterType == typeof(string)
+                    ? (object)traceparent
+                    : ConvertTo(p2.ParameterType, traceparent);
+                if (arg2 != null)
+                {
+                    m.Invoke(headers, new[] { "traceparent", arg2 });
+                    return;
+                }
+            }
+            var item = t.GetProperty("Item", new[] { typeof(string) });
+            if (item?.CanWrite == true)
+                item.SetValue(headers, ConvertTo(item.PropertyType, traceparent), new object[] { "traceparent" });
+        }
+        catch { }
+    }
+
+    private static object? ConvertTo(Type target, string value)
+    {
+        if (target == typeof(string)) return value;
+        var sv = Type.GetType("Microsoft.Extensions.Primitives.StringValues, Microsoft.Extensions.Primitives");
+        if (sv != null && target == sv)
+        {
+            var ctor = sv.GetConstructor(new[] { typeof(string) });
+            return ctor?.Invoke(new object[] { value });
+        }
+        return null;
+    }
+
     private void EnrichWithHeaders(object requestObj, Span span)
     {
         var headers = PropertyFetcher.FetchProperty(requestObj, "Headers");
         if (headers == null) return;
 
-        var headerNames = new[] { "User-Agent", "X-Request-ID", "X-Trace-ID", "Content-Type" };
+        var headerNames = new[] { "User-Agent", "X-Request-ID", "X-Trace-ID", "Content-Type", "traceparent", "Traceparent" };
         
         foreach (var headerName in headerNames)
         {

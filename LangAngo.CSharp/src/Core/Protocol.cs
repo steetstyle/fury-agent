@@ -30,6 +30,8 @@ public static class Protocol
         ThreadPoolEvent = 0x12,
         ContentionEvent = 0x13,
         Sampling = 0x20,
+        SymbolMap = 0x21,
+        RuntimeMethodEvent = 0x22,
     }
 
     public enum SpanKind : byte

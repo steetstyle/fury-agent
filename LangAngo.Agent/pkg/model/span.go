@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"encoding/hex"
+	"fmt"
+	"time"
+)
 
 type PayloadType uint8
 
@@ -26,7 +30,9 @@ const (
 	EventTypeJIT           EventType = 0x11
 	EventTypeThreadPool    EventType = 0x12
 	EventTypeContention    EventType = 0x13
-	EventTypeSampling      EventType = 0x20
+	EventTypeSampling       EventType = 0x20
+	EventTypeSymbolMap      EventType = 0x21
+	EventTypeRuntimeMethod  EventType = 0x22
 )
 
 type SpanKind uint8
@@ -63,6 +69,12 @@ type Span struct {
 	Attributes    map[string]string
 }
 
+// Traceparent returns the W3C traceparent header value for this span (00-{traceId}-{spanId}-01)
+// so HTTP responses and agent logs can use the same format for correlation.
+func (s *Span) Traceparent() string {
+	return fmt.Sprintf("00-%s-%016x-01", hex.EncodeToString(s.TraceID[:]), s.SpanID)
+}
+
 type EventPipeEvent struct {
 	EventType    EventType
 	Timestamp    uint64
@@ -96,6 +108,23 @@ func (e *EventPipeEvent) ToSpan() *Span {
 		}
 	case EventTypeJIT:
 		span.Attributes["event_type"] = "jit"
+		if e.Tags != nil {
+			for k, v := range e.Tags {
+				span.Attributes[k] = v
+			}
+		}
+	case EventTypeSymbolMap:
+		span.Attributes["event_type"] = "symbolmap"
+		if e.Tags != nil {
+			for k, v := range e.Tags {
+				span.Attributes[k] = v
+			}
+		}
+	case EventTypeRuntimeMethod:
+		span.Attributes["event_type"] = "runtime_method"
+		if e.Name != "" {
+			span.Attributes["method_event"] = e.Name
+		}
 		if e.Tags != nil {
 			for k, v := range e.Tags {
 				span.Attributes[k] = v

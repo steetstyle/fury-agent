@@ -8,7 +8,7 @@ namespace LangAngo.CSharp.Instrumentation;
 
 public sealed class MethodTracer
 {
-    private static readonly Dictionary<int, Span> _activeSpans = new();
+    private static readonly AsyncLocal<Stack<(TraceContext? Prev, Span Span)>?> _activeSpanStack = new();
     private static readonly object _lock = new();
     private static string? _includes;
     private static string? _excludes;
@@ -71,12 +71,30 @@ public sealed class MethodTracer
         return name.Contains(pattern) || name.EndsWith(pattern);
     }
 
-    public static void MethodEnter([CallerMemberName] string methodName = "", 
-        [CallerFilePath] string filePath = "", 
+    /// <summary>Source generator or manual calls (Caller* attributes).</summary>
+    public static void MethodEnter([CallerMemberName] string methodName = "",
+        [CallerFilePath] string filePath = "",
         [CallerLineNumber] int lineNumber = 0)
     {
+        MethodEnterCore(methodName, null, filePath, lineNumber);
+    }
+
+    /// <summary>Cecil and Profiler instrumentation: explicit method/type names (no Caller*).</summary>
+    public static void MethodEnter(string methodName, string? declaringTypeFullName = null, string? filePath = null, int lineNumber = 0)
+    {
+        MethodEnterCore(methodName, declaringTypeFullName, filePath ?? "", lineNumber);
+    }
+
+    /// <summary>Weaver-only: exactly 2 args so IL can emit ldstr, ldstr, call without optional params.</summary>
+    public static void MethodEnter(string methodName, string? declaringTypeFullName)
+    {
+        MethodEnterCore(methodName, declaringTypeFullName, "", 0);
+    }
+
+    private static void MethodEnterCore(string methodName, string? declaringTypeFullName, string filePath, int lineNumber)
+    {
         Logger.Verbose("MethodEnter: {0}", methodName);
-        
+
         if (!ShouldTrace(methodName))
         {
             Logger.Verbose("MethodEnter: {0} filtered out", methodName);
@@ -87,29 +105,32 @@ public sealed class MethodTracer
 
         try
         {
-            var currentCtx = TraceContext.TryGetCurrent() ?? TraceContext.CreateChild();
-            currentCtx.SetAsCurrent();
+            var previous = TraceContext.TryGetCurrent();
+            var child = TraceContext.CreateChild(Protocol.SpanKind.Internal);
+            child.SetAsCurrent();
 
+            var spanName = string.IsNullOrEmpty(declaringTypeFullName) ? methodName : $"{declaringTypeFullName}.{methodName}";
             var span = new Span
             {
                 Type = Protocol.PayloadType.Span,
-                TraceId = currentCtx.TraceId,
-                SpanId = currentCtx.SpanId,
-                ParentId = currentCtx.ParentId,
+                TraceId = child.TraceId,
+                SpanId = child.SpanId,
+                ParentId = child.ParentId,
                 Kind = Protocol.SpanKind.Internal,
-                Name = $"{methodName}",
-                ServiceName = currentCtx.ServiceName,
+                Name = spanName,
+                ServiceName = child.ServiceName,
                 StartTimestamp = Stopwatch.GetTimestamp()
             };
-
             span.Metadata["method.name"] = methodName;
             span.Metadata["method.file"] = filePath;
             span.Metadata["method.line"] = lineNumber.ToString();
+            if (!string.IsNullOrEmpty(declaringTypeFullName))
+                span.Metadata["method.declaringType"] = declaringTypeFullName;
 
-            var threadId = Environment.CurrentManagedThreadId;
             lock (_lock)
             {
-                _activeSpans[threadId] = span;
+                var stack = _activeSpanStack.Value ??= new Stack<(TraceContext? Prev, Span Span)>();
+                stack.Push((Prev: previous, Span: span));
             }
         }
         catch (Exception ex)
@@ -120,39 +141,42 @@ public sealed class MethodTracer
 
     public static void MethodLeave()
     {
-        var threadId = Environment.CurrentManagedThreadId;
-        Logger.Verbose("MethodLeave: threadId={0}", threadId);
+        Logger.Verbose("MethodLeave");
         
-        Span? span;
         lock (_lock)
         {
-            if (!_activeSpans.TryGetValue(threadId, out span))
+            var stack = _activeSpanStack.Value;
+            if (stack == null || stack.Count == 0)
             {
-                Logger.Warning("MethodLeave: no span found for thread {0}", threadId);
+                Logger.Warning("MethodLeave: no span found");
                 return;
             }
-            _activeSpans.Remove(threadId);
-        }
+            var data = stack.Pop();
+            if (stack.Count == 0)
+                _activeSpanStack.Value = null;
 
-        if (span == null) return;
+            var methodSpan = data.Span;
+            if (methodSpan == null) return;
 
-        try
-        {
-            span.EndTimestamp = Stopwatch.GetTimestamp();
-            
-            var durationNs = span.DurationNanoseconds;
-            span.Metadata["duration.ns"] = durationNs.ToString("F0");
+            try
+            {
+                methodSpan.EndTimestamp = Stopwatch.GetTimestamp();
+                methodSpan.Metadata["duration.ns"] = methodSpan.DurationNanoseconds.ToString("F0");
 
-            Logger.Verbose("Sending method span to channel: {0}", span.Name);
-            SpanChannel.Writer.TryWrite(span);
-        }
-        catch (Exception ex)
-        {
-            Logger.Warning("MethodLeave error: {0}", ex.Message);
-        }
-        finally
-        {
-            TraceContext.Clear();
+                Logger.Verbose("Sending method span to channel: {0}", methodSpan.Name);
+                SpanChannel.Writer.TryWrite(methodSpan);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning("MethodLeave error: {0}", ex.Message);
+            }
+            finally
+            {
+                if (data.Prev != null)
+                    data.Prev.SetAsCurrent();
+                else
+                    TraceContext.Clear();
+            }
         }
     }
 }

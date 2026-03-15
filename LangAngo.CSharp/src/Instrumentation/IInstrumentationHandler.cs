@@ -75,7 +75,8 @@ public static class InstrumentationInitializer
     {
         Handlers = new IInstrumentationHandler[]
         {
-            new HttpHandler(),
+            new HttpInboundHandler(),
+            new HttpOutboundHandler(),
             new DbHandler(),
             new ExceptionHandler()
         };

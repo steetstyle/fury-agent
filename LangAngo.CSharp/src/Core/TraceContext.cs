@@ -33,6 +33,33 @@ public sealed class TraceContext
         return new TraceContext(traceId, spanId, null, kind, serviceName);
     }
 
+    /// <summary>Create context from W3C traceparent (incoming request). Format: 00-{traceId}-{parentSpanId}-01</summary>
+    public static TraceContext? CreateFromW3C(string? traceparent, Protocol.SpanKind kind = Protocol.SpanKind.Server)
+    {
+        if (string.IsNullOrWhiteSpace(traceparent)) return null;
+        var parts = traceparent.Trim().Split('-');
+        if (parts.Length != 4 || parts[0] != "00") return null;
+        if (parts[1].Length != 32 || parts[2].Length != 16) return null;
+        try
+        {
+            var traceId = Guid.ParseExact(parts[1], "N");
+            var parentSpanId = Convert.ToUInt64(parts[2], 16);
+            var spanId = GenerateSpanId();
+            var serviceName = GetServiceName();
+            return new TraceContext(traceId, spanId, parentSpanId, kind, serviceName);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>W3C traceparent value for propagation. 00-{traceId}-{spanId}-01</summary>
+    public string ToTraceparent()
+    {
+        return $"00-{TraceId:N}-{SpanId:X16}-01";
+    }
+
     public static TraceContext CreateChild(Protocol.SpanKind kind = Protocol.SpanKind.Internal)
     {
         var parent = Current ?? CreateRoot(kind);

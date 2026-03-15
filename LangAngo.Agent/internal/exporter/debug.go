@@ -26,7 +26,7 @@ func (e *DebugExporter) Export(span *model.Span) {
 	if e.pretty {
 		e.printPretty(span)
 	} else {
-		fmt.Printf("Span: %s | TraceID: %x | SpanID: %x\n", span.Name, span.TraceID, span.SpanID)
+		fmt.Printf("Span: %s | %s\n", span.Name, span.Traceparent())
 	}
 }
 
@@ -38,6 +38,7 @@ func (e *DebugExporter) printPretty(span *model.Span) {
 		fmt.Printf("┌─ ✓ %s\n", span.Name)
 		fmt.Printf("│  TraceID: %s\n", traceID)
 		fmt.Printf("│  SpanID:  %s\n", spanID)
+		fmt.Printf("│  traceparent: %s\n", span.Traceparent())
 		fmt.Printf("│  Type:    %d | Kind: %d | Status: %d\n", span.Type, span.Kind, span.Status)
 
 		if span.ServiceName != "" {
@@ -65,7 +66,7 @@ func (e *DebugExporter) printPretty(span *model.Span) {
 		}
 		fmt.Printf("└\n")
 	} else {
-		fmt.Printf("[%s] TraceID: %s SpanID: %s Kind: %d\n", span.Name, traceID, spanID, span.Kind)
+		fmt.Printf("[%s] %s Kind: %d\n", span.Name, span.Traceparent(), span.Kind)
 	}
 }
 
@@ -150,8 +151,7 @@ func NewConsoleExporter() *ConsoleExporter {
 func (e *ConsoleExporter) Export(span *model.Span) {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Span: %s\n", span.Name))
-	sb.WriteString(fmt.Sprintf("  TraceID: %x\n", span.TraceID))
-	sb.WriteString(fmt.Sprintf("  SpanID: %x\n", span.SpanID))
+	sb.WriteString(fmt.Sprintf("  traceparent: %s\n", span.Traceparent()))
 	sb.WriteString(fmt.Sprintf("  Kind: %v\n", span.Kind))
 	sb.WriteString(fmt.Sprintf("  Status: %v\n", span.Status))
 

@@ -6,6 +6,8 @@ namespace LangAngo.CSharp.Instrumentation;
 
 public sealed class DbHandler : BaseInstrumentationHandler
 {
+    private static readonly AsyncLocal<Stack<(TraceContext? Prev, Span Span)>> _stack = new();
+
     public override string SourceName => "Microsoft.EntityFrameworkCore";
 
     public override bool CanHandle(string eventName) =>
@@ -26,42 +28,51 @@ public sealed class DbHandler : BaseInstrumentationHandler
 
     private void OnCommandStart(object payload)
     {
+        var parent = TraceContext.TryGetCurrent();
+        if (parent == null) return;
+
         var commandText = PropertyFetcher.FetchProperty(payload, "CommandText")?.ToString() ?? "";
-        var parameters = PropertyFetcher.FetchProperty(payload, "Parameters");
-        
-        var currentCtx = TraceContext.TryGetCurrent() ?? TraceContext.CreateChild(Protocol.SpanKind.Client);
-        
-        var shortCommand = commandText.Length > 50 ? commandText.Substring(0, 50) + "..." : commandText;
+        var child = TraceContext.CreateChild(Protocol.SpanKind.Client);
+        child.SetAsCurrent();
+
+        var shortCommand = commandText.Length > 50 ? commandText[..50] + "..." : commandText;
         var span = new Span
         {
             Type = Protocol.PayloadType.Span,
-            TraceId = currentCtx.TraceId,
-            SpanId = currentCtx.SpanId,
-            ParentId = currentCtx.ParentId,
+            TraceId = child.TraceId,
+            SpanId = child.SpanId,
+            ParentId = child.ParentId,
             Kind = Protocol.SpanKind.Client,
             Name = $"DB: {shortCommand}",
-            ServiceName = currentCtx.ServiceName,
+            ServiceName = child.ServiceName,
             StartTimestamp = Stopwatch.GetTimestamp()
         };
-
         span.Metadata["db.system"] = "postgresql";
         span.Metadata["db.statement"] = commandText;
-        
-        SpanChannel.Writer.TryWrite(span);
+
+        var stack = _stack.Value ?? new Stack<(TraceContext? Prev, Span Span)>();
+        stack.Push((Prev: parent, Span: span));
+        _stack.Value = stack;
     }
 
     private void OnCommandExecuted(object payload)
     {
+        var stack = _stack.Value;
+        if (stack == null || stack.Count == 0) return;
+
+        var (prev, dbSpan) = stack.Pop();
+        if (stack.Count == 0) _stack.Value = null;
+
+        dbSpan.EndTimestamp = Stopwatch.GetTimestamp();
         var duration = PropertyFetcher.FetchProperty(payload, "Duration");
         if (duration != null)
-        {
-            var span = new Span
-            {
-                Type = Protocol.PayloadType.Span,
-                Name = "DB Executed",
-                EndTimestamp = Stopwatch.GetTimestamp()
-            };
-            SpanChannel.Writer.TryWrite(span);
-        }
+            dbSpan.Metadata["db.duration_ms"] = duration.ToString() ?? "";
+
+        if (prev != null)
+            prev.SetAsCurrent();
+        else
+            TraceContext.Clear();
+
+        SpanChannel.Writer.TryWrite(dbSpan);
     }
 }

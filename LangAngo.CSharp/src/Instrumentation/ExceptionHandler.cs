@@ -144,7 +144,7 @@ public sealed class ExceptionHandler : BaseInstrumentationHandler
                     ? stackTrace[..1000] + "..." 
                     : stackTrace);
             }
-            
+
             SpanChannel.Writer.TryWrite(span);
             Logger.Info("[ExceptionHandler] Exception captured: {0}", exceptionType);
         }
