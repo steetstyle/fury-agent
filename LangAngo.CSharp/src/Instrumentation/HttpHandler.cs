@@ -34,6 +34,7 @@ public sealed class HttpHandler : BaseInstrumentationHandler
 
         var path = "/";
         var method = "GET";
+        var queryString = "";
 
         var requestObj = PropertyFetcher.FetchProperty(context, "Request");
         if (requestObj != null)
@@ -47,7 +48,17 @@ public sealed class HttpHandler : BaseInstrumentationHandler
             
             var reqMethod = PropertyFetcher.FetchProperty(requestObj, "Method");
             method = reqMethod?.ToString() ?? "GET";
+
+            var qs = PropertyFetcher.FetchProperty(requestObj, "QueryString");
+            if (qs != null)
+            {
+                var qsValue = PropertyFetcher.FetchProperty(qs, "Value");
+                queryString = qsValue?.ToString() ?? "";
+                if (queryString == "?") queryString = "";
+            }
         }
+
+        var fullUrl = string.IsNullOrEmpty(queryString) ? path : $"{path}{queryString}";
 
         var ctx = TraceContext.CreateRoot(Protocol.SpanKind.Server);
         ctx.SetAsCurrent();
@@ -66,8 +77,12 @@ public sealed class HttpHandler : BaseInstrumentationHandler
         };
 
         span.Metadata.TryAdd("http.method", method);
-        span.Metadata.TryAdd("http.url", path);
+        span.Metadata.TryAdd("http.url", fullUrl);
         span.Metadata.TryAdd("http.target", path);
+        if (!string.IsNullOrEmpty(queryString))
+        {
+            span.Metadata.TryAdd("http.query_string", queryString.TrimStart('?'));
+        }
 
         if (requestObj != null)
         {
@@ -109,6 +124,17 @@ public sealed class HttpHandler : BaseInstrumentationHandler
         if (host != null)
         {
             span.Metadata["http.host"] = host.ToString() ?? "";
+        }
+
+        var queryString = PropertyFetcher.FetchProperty(requestObj, "QueryString");
+        if (queryString != null)
+        {
+            var qsValue = PropertyFetcher.FetchProperty(queryString, "ToString");
+            var qs = qsValue?.ToString();
+            if (!string.IsNullOrEmpty(qs) && qs != "?")
+            {
+                span.Metadata["http.query_string"] = qs.TrimStart('?');
+            }
         }
     }
 
